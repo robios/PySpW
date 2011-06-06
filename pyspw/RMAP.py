@@ -4,11 +4,10 @@
 #
 # 2011/05/30	K. Sakai (sakai@astro.isas.jaxa.jp)
 
+import socket
 import threading
-import select
 import struct
 import Queue
-import collections
 import time
 
 # Configuration
@@ -32,11 +31,24 @@ class Engine(object):
 		
 		def run(self):
 			self.running = True
-			while self.running:
-				tid, dest, status, data, opt = depacketize(self.engine.spwif.receive())
-				reply = self.engine.sockets[tid]
-				reply.put((dest, status, data, opt))
 			
+			# Nested *while* is for performance enhancement while enabling safe(?) thread stop
+			while self.running:
+				try:
+					while self.running:
+						tid, dest, status, data, opt = depacketize(self.engine.spwif.receive())
+						reply = self.engine.replies[tid]
+
+						# Check if transaction id is invalidated
+						if reply:
+							reply.put((dest, status, data, opt))
+				
+				except socket.timeout:
+					# Continue as long as running flag is set
+					pass
+
+			# Thread stopped
+			self.running = False
 			return
 	
 	class Requester(threading.Thread):
@@ -53,10 +65,17 @@ class Engine(object):
 
 		def run(self):
 			self.running = True
-			while self.running:
-				self.engine.spwif.send(self.engine.requests.get())
-				self.engine.requests.task_done()
-
+			try:
+				while self.running:
+					self.engine.spwif.send(self.engine.requests.get())
+					self.engine.requests.task_done()
+			
+			except TypeError:
+				# It's time to stop
+				pass
+			
+			# Thread stopped
+			self.running = False
 			return
 
 	def __init__(self, spwif):
@@ -67,15 +86,26 @@ class Engine(object):
 		self.requester = None
 		
 		# Initialize pools
-		self.sockets = {}
 		self.requests = Queue.Queue()
+		self.replies = [ None for i in range(Max_SID) ]
+		self.timedout_sids = {}
 		self.sids = range(Max_SID)
+		self.sids.reverse()
+		
+		# Lock
+		self.lock = threading.Lock()
+		
+		# Set SpW I/F timeout
+		self.spwif.settimeout(1)
 		
 		# Start SpW I/F if not started
-		if not self.spwif.isOpen:
+		if not self.spwif.sock:
 			self.spwif.open()
 	
 	def start(self):
+		"""
+		Start RMAP engine. RMAP socket read/write will not work (stop forever unless timeout is set) before starting RMAP engine.
+		"""
 		# Start Receiver & Requester
 		self.receiver = self.Receiver(self)
 		self.requester = self.Requester(self)
@@ -83,74 +113,106 @@ class Engine(object):
 		self.requester.start()
 		
 	def stop(self):
-		# CHECK!!! : This won't stop running threads!
+		"""
+		Stop RMAP engine. May take less than 1 second.
+		"""
 		# Stop Receiver & Requester
-		if self.receiver is not None:
+		if self.receiver:
+			# Stop receiver
 			self.receiver.running = False
 		
-		if self.requester is not None:
-			self.requester.running = False
+		if self.requester:
+			# This is a little rough way to stop it, but this is the best way for requester performance.
+			# Using Queue timeout will degrade performance. Don't use it.
+			self.requests.put(None)
 		
-	def socket(self, destination, timeout=None):
-		return Socket(self, destination, timeout)
+		self.receiver.join()
+		self.requester.join()
+		
+	def socket(self, destination, **kwargs):
+		"""
+		Return new socket.
+		Allowed keywords (and their default values):
+			timeout: None for no time out, integers for time out second(s) (default: 1)
+		"""
+		return Socket(self, destination, **kwargs)
 
 	def request(self, packet):
 		self.requests.put(packet)
 
-	def request_sid(self, reply):
-		# Pop socket id
-		sid = self.sids.pop()
+	def request_sid(self, reply, block=True):
+		"""
+		Retrieve new socket id and register reply queue.
+		"""
+		# First clean up sid pool
+		self.clean_sid()
+		
+		# Pop transaction id
+		while block:
+			try:
+				sid = self.sids.pop()
+				break
+			except IndexError:
+				# No more sid to pop, sleep now...				
+				time.sleep(1)
+				
+				# Clean up again
+				self.clean_sid()
+		
+				# Let's try again
+				continue
 
-		# Register socket to pool
-		self.sockets[sid] = reply
+		# Register reply to pool
+		self.replies[sid] = reply
 
 		return sid
 		
-	def return_sid(self, sid):
-		# Delete sid from socket pool
-		del self.sockets[sid]
-
-		# Append back the sid
-		self.sids.append(sid)
-	
-class Destination(object):
-	"""
-	RMAP Destination
-	Handles RMAP destination information.
-	"""
-	
-	__slots__ = ["dest_address", "dest_key", "src_address", "crc", "word_width"]
-	
-	def __init__(self, dest_address=0x00, dest_key=0x00, src_address=0x00, crc=None, word_width=1):
-		self.dest_address = dest_address
-		self.dest_key = dest_key
-		self.src_address = src_address
-		self.crc = crc
-		self.word_width = word_width
+	def return_sid(self, sid, timedout=False):
+		"""
+		Return socket id. Set timedout to True if transaction has timed out and put socket it to temporary socket pool.
+		"""
+		# Delete sid from pool
+		self.replies[sid] = None
 		
-	def lookup_crc(self, dest_address):
-		pass
+		if timedout:
+			self.timedout_sids[sid] = time.time()
+		else:
+			# Append back the sid
+			self.sids.append(sid)
+
+	def clean_sid(self):
+		"""
+		Clean up timed-out transactions.
+		"""
+		if self.timedout_sids:
+			self.lock.acquire()
+			for item in self.timedout_sids.items():
+				if time.time() - item[1] > 10:
+					# 10 second older transactions should be considered free
+					del self.timedout_sids[item[0]]
+					self.sids.append(item[0])
+			self.lock.release()
+			
 
 class Socket(object):
-	def __init__(self, engine, destination, timeout=None):
+	def __init__(self, engine, destination, **kwargs):
 		self.engine = engine
 		self.dest = destination
 
 		# Default timeout: 1 second
-		if not timeout:
-			timeout = 1
-		self.timeout = timeout
+		self.timeout = kwargs.get('timeout', 1)
 		
-		# Generate notifier and reply queue then register it to RMAP engine
+		# Generate reply queue and register it
 		self.reply = Queue.Queue()
-		self.sid = engine.request_sid(self.reply)
+		self.sid = self.engine.request_sid(self.reply)
 		
 		# Reset timeout counter
 		self.timeout_count = 0
-		
-	def __del__(self):
-		self.engine.return_sid(self.sid)
 
+	def __del__(self):
+		# Unregister reply queue
+		self.engine.return_sid(self.sid)
+	
 	def read(self, address, length, **kwargs):
 		"""
 		RMAP Read
@@ -162,24 +224,31 @@ class Socket(object):
 		This function is not thread-safe. Simultaneous call to this function of the *same* instance is not supported.
 		Generate new socket per thread instead.
 		"""
-		# Packetize read command
-		packet = packetize(self.sid, self.dest, address, length, **kwargs)
-		
-		# Request command
 		reply = None
 		while not reply:
+			# Packetize read command
+			packet = packetize(self.sid, self.dest, address, length, **kwargs)
+
+			# Request command
 			self.engine.request(packet)
 
 			# Wait for reply
 			try:
 				reply = self.reply.get(timeout=self.timeout)
 			except Queue.Empty:
-				# Timed out! Retry sending command
+				# Timed out
+				print "Timed out for sid: %d" % self.sid
+				# Return socket id with timed-out flag set
+				self.engine.return_sid(self.sid, timedout=True)
+				
+				# Renew socket id
+				self.sid = self.engine.request_sid(self.reply)
+
 				self.timeout_count += 1
 				continue
 		
 		assert reply[1] == 0
-		
+
 		# Return received data only for now
 		return reply[2]
 		
@@ -213,13 +282,30 @@ class Socket(object):
 				try:
 					reply = self.reply.get(timeout=self.timeout)
 				except Queue.Empty:
-					# Timed out! Retry sending command
+					# Timed out
+					
+					# Return socket id with timed-out flag set
+					self.engine.return_sid(self.sid, timedout=True)
+
+					# Renew socket id
+					sid = self.engine.request_sid(self.reply)
+
+					# Repacketize write command
+					packet = packetize(self.sid, self.dest, address, len(data), data, **kwargs)
+					
 					self.timeout_count += 1
 					continue
 			
 			assert reply[1] == 0
 
 def packetize(tid, dest, address, length, data=None, **kwargs):
+	"""
+	RMAP Packetizer
+	Packetize commands to RMAP protocol packets.
+	
+	For RMAP Read command, leave data as None, or interpreted as RMAP Write command.
+	"""
+	
 	# Initialize
 	pack = struct.pack
 	
@@ -247,6 +333,10 @@ def packetize(tid, dest, address, length, data=None, **kwargs):
 	return packet
 
 def depacketize(packet, check_crc=False):
+	"""
+	RMAP Depacketizer
+	Depacketize RMAP protocol packets.
+	"""
 	# Initialize
 	unpack = struct.unpack
 	dest = Destination()
@@ -268,12 +358,12 @@ def depacketize(packet, check_crc=False):
 		length = (lambda (ms, b, ls, ): (ms << 16) + (b << 8) + ls)(unpack('BBB', packet[8:11]))
 		(crc, ) = unpack('B', packet[11:12])
 		if check_crc:
-			pass
+			assert crc == calc_crc(dest.lookup_crc(), packet[0:11])
 		
 		data = unpack('B'*length, packet[12:12+length])
 		(crc, ) = unpack('B', packet[12+length:12+length+1])
 		if check_crc:
-			pass
+			assert crc == calc_crc(dest.lookup_crc(), packet[12:12+length])
 	
 	return tid, dest, status, data, {'rw': rw, 'verify': verify, 'ack': ack, 'increment': increment}
 
@@ -290,6 +380,36 @@ def calc_crc(crc, data):
 	
 	return reduce(lambda x, y: table[(x ^ y) & 0xff], struct.unpack('B'*len(data), data), 0x00)
 
+
+class Destination(object):
+	"""
+	RMAP Destination
+	Handles RMAP destination information.
+	"""
+
+	# Magic salt
+	__slots__ = ["dest_address", "dest_key", "src_address", "crc", "word_width"]
+
+	# CRC Map
+	crc_map = {}
+
+	def __init__(self, dest_address=0x00, dest_key=0x00, src_address=0x00, crc=None, word_width=1):
+		self.dest_address = dest_address
+		self.dest_key = dest_key
+		self.src_address = src_address
+		self.crc = crc
+		self.word_width = word_width
+
+		Destination.crc_map[dest_address] = crc
+
+	def lookup_crc(self):
+		"""
+		Return CRC type for registered destinations. If not registered, return None.
+		"""
+		try:
+			return Destination.crc_map[self.dest_address]
+		except KeyError:
+			return None
 
 # CRC Mode Constants
 (CRC_DraftE, CRC_DraftF) = (0, 1)

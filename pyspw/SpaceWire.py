@@ -21,18 +21,18 @@ ControlFlag_RegisterAccess_WriteCommand = '\x50'
 ControlFlag_RegisterAccess_WriteReply = '\x51'
 
 class Interface(object):
-	def __init__(self, host, port=10030):
+	def __init__(self, host, port=10030, timeout=None):
 		self.host = host
 		self.port = port
+		self.timeout = timeout
 		self.sock = None
-		self.isOpen = False
 		
 	def open(self):
 		try:
 			self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-			#self.sock.setsockopt(socket.SOL_TCP, socket.TCP_NODELAY, 1)
+			self.sock.setsockopt(socket.SOL_TCP, socket.TCP_NODELAY, 1)
+			self.sock.settimeout(self.timeout)
 			self.sock.connect((self.host, self.port))
-			self.isOpen = True
 		except socket.error, (value, message):
 			if self.sock:
 				self.sock.close()
@@ -40,10 +40,9 @@ class Interface(object):
 			sys.exit(1)
 			
 	def close(self):
-		if self.sock is not None:
+		if self.sock:
 			self.sock.close()
 		self.sock = None
-		self.isOpen = False
 		
 	def send(self, packet):
 		# SSDTP2
@@ -84,6 +83,11 @@ class Interface(object):
 		
 		return data
 	
+	def settimeout(self, timeout):
+		self.timeout = timeout
+		if self.sock:
+			self.sock.settimeout(timeout)
+	
 	def fileno(self):
-		if self.isOpen:
+		if self.sock:
 			return self.sock.fileno()
