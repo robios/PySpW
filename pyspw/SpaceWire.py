@@ -5,7 +5,6 @@
 # 2011/05/30	K. Sakai (sakai@astro.isas.jaxa.jp)
 
 import socket
-import sys
 import struct
 
 # SSDTP2 Control Flags
@@ -21,6 +20,10 @@ ControlFlag_RegisterAccess_WriteCommand = '\x50'
 ControlFlag_RegisterAccess_WriteReply = '\x51'
 
 class Interface(object):
+	"""
+	SpaceWire Interface
+	This interface talks SSDTP2 so this can connect to sthongo and SpaceWire-to-GigabitEther converters over TCP networks.
+	"""
 	def __init__(self, host, port=10030, timeout=None):
 		self.host = host
 		self.port = port
@@ -28,23 +31,22 @@ class Interface(object):
 		self.sock = None
 		
 	def open(self):
-		try:
-			self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-			self.sock.setsockopt(socket.SOL_TCP, socket.TCP_NODELAY, 1)
-			self.sock.settimeout(self.timeout)
-			self.sock.connect((self.host, self.port))
-		except socket.error, (value, message):
-			if self.sock:
-				self.sock.close()
-			print "Failed to open socket: " + message
-			sys.exit(1)
-			
+		"""
+		Connect to target. Exceptions are not handled within this function.
+		"""
+		self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+		self.sock.settimeout(self.timeout)
+		self.sock.connect((self.host, self.port))
+		
 	def close(self):
 		if self.sock:
 			self.sock.close()
 		self.sock = None
 		
 	def send(self, packet):
+		"""
+		Send a packet to target using SSDTP2 protocol.
+		"""
 		# SSDTP2
 		header = '\x00\x00'
 		length = len(packet)
@@ -52,6 +54,9 @@ class Interface(object):
 		self.sock.sendall(header + packet)
 		
 	def receive(self):
+		"""
+		Receive a packet from target. This function blocks if time out is not set and there's nothing to receive.
+		"""
 		# SSDTP2
 		header = '\xff'
 		data = ''
@@ -84,10 +89,16 @@ class Interface(object):
 		return data
 	
 	def settimeout(self, timeout):
+		"""
+		Set socket time out in sencond.
+		"""
 		self.timeout = timeout
 		if self.sock:
 			self.sock.settimeout(timeout)
 	
 	def fileno(self):
+		"""
+		Return socket file number.
+		"""
 		if self.sock:
 			return self.sock.fileno()
