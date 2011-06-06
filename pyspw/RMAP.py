@@ -237,7 +237,6 @@ class Socket(object):
 				reply = self.reply.get(timeout=self.timeout)
 			except Queue.Empty:
 				# Timed out
-				print "Timed out for sid: %d" % self.sid
 				# Return socket id with timed-out flag set
 				self.engine.return_sid(self.sid, timedout=True)
 				
