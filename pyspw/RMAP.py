@@ -388,7 +388,7 @@ class Destination(object):
 			dest_address:		destination logical address
 			dest_key:			destination key (optional, default: 0x00)
 			crc:				CRC type (optional, default: None)
-			word_width:			word width (optional, default: 1)
+			word_width:			word width 1, 2 or 4 (optional, default: 1)
 		
 		Note
 		----
@@ -450,6 +450,7 @@ def packetize(tid, dest, address, length, data=None, **kwargs):
 	
 	# Initialize
 	pack = struct.pack
+	blength = length * dest.word_width
 	
 	# Packet Header
 	packet = pack('BB', dest.dest_address, 0x01)
@@ -461,17 +462,27 @@ def packetize(tid, dest, address, length, data=None, **kwargs):
 		com = (0x1 << 6) + (0x8 + (kwargs.get('verify', 1) << 2) + (kwargs.get('ack', 1) << 1) + (kwargs.get('increment', 1)) << 2) + 0x0
 	packet += pack('B', com)
 	packet += pack('BB', dest.dest_key, dest.src_address)
-	packet += pack('BB', (tid >> 8) & 0xff, tid & 0xff)
+	#packet += pack('BB', (tid >> 8) & 0xff, tid & 0xff)
+	packet += pack('>H', tid)
 	packet += pack('B', kwargs.get('extended_address', 0x00))
-	packet += pack('BBBB', (address >> 24) & 0xff, (address >> 16) & 0xff, (address >> 8) & 0xff, address & 0xff)
-	packet += pack('BBB', (length >> 16) & 0xff, (length >> 8) & 0xff, length & 0xff)
+	packet += pack('>L', address)
+	packet += pack('>BH', (blength >> 16) & 0xff, blength & 0xffff)
 	packet += pack('B', calc_crc(dest.crc, packet))
 	
 	# Packet Data
 	if data is not None:
-		packet += pack('B'*len(data), *data)
-		packet += pack('B', calc_crc(dest.crc, pack('B'*len(data), *data)))
-	
+		if dest.word_width == 1:
+			packet += pack('B'*len(data), *data)
+			packet += pack('B', calc_crc(dest.crc, pack('B'*len(data), *data)))
+		elif dest.word_width == 2:
+			packet += pack('>'+'H'*len(data), *data)
+			packet += pack('B', calc_crc(dest.crc, pack('>'+'H'*len(data), *data)))
+		elif dest.word_width == 4:
+			packet += pack('>'+'L'*len(data), *data)
+			packet += pack('B', calc_crc(dest.crc, pack('>'+'L'*len(data), *data)))
+		else:
+			assert False, "given word_width %d is not supported." % (dest.word_width)
+			
 	return packet
 
 def depacketize(packet, check_crc=False):
@@ -501,7 +512,7 @@ def depacketize(packet, check_crc=False):
 	(rw, verify, ack, increment) = (lambda (com, ): ((com & 0x20) >> 5, (com & 0x10) >> 4, (com & 0x08) >> 3, (com & 0x04) >> 2))(unpack('B', packet[2:3]))
 	(status, ) = unpack('B', packet[3:4])
 	(dest_address, ) = unpack('B', packet[4:5])
-	tid = (lambda (ms, ls, ): (ms << 8) + ls)(unpack('BB', packet[5:7]))
+	(tid, ) = unpack('>H', packet[5:7])
 	
 	# Recover destination
 	dest = Destination(src_address, dest_address)
@@ -509,18 +520,30 @@ def depacketize(packet, check_crc=False):
 	if rw == 1:
 		# Write reply
 		(crc, ) = unpack('B', packet[7:8])
+		if check_crc:
+			assert crc == calc_crc(dest.crc, packet[0:7])
+		
 		data = None
 	else:
 		# Read reply
-		length = (lambda (ms, b, ls, ): (ms << 16) + (b << 8) + ls)(unpack('BBB', packet[8:11]))
+		blength = (lambda (ms, b, ls, ): (ms << 16) + (b << 8) + ls)(unpack('BBB', packet[8:11]))
+		length = blength / dest.word_width
 		(crc, ) = unpack('B', packet[11:12])
 		if check_crc:
 			assert crc == calc_crc(dest.crc, packet[0:11])
 		
-		data = unpack('B'*length, packet[12:12+length])
-		(crc, ) = unpack('B', packet[12+length:12+length+1])
+		if dest.word_width == 1:
+			data = unpack('B'*length, packet[12:12+blength])
+		elif dest.word_width == 2:
+			data = unpack('>'+'H'*length, packet[12:12+blength])
+		elif dest.word_width == 4:
+			data = unpack('>'+'L'*length, packet[12:12+blength])
+		else:
+			assert False, "given word_width %d is not supported." % (dest.word_width)
+
+		(crc, ) = unpack('B', packet[12+blength:12+blength+1])
 		if check_crc:
-			assert crc == calc_crc(dest.crc, packet[12:12+length])
+			assert crc == calc_crc(dest.crc, packet[12:12+blength])
 	
 	return tid, dest, status, data, {'rw': rw, 'verify': verify, 'ack': ack, 'increment': increment}
 
