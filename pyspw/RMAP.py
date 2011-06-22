@@ -79,6 +79,17 @@ class Engine(object):
 			return
 
 	def __init__(self, spwif):
+		"""
+		Create RMAP Engine
+		
+		Parameter
+		---------
+			spwif:		SpaceWire.Interface instance
+		
+		Note
+		----
+		* spwif will be opened if closed.
+		"""
 		self.spwif = spwif
 		
 		# Child processor handles
@@ -132,7 +143,13 @@ class Engine(object):
 	def socket(self, destination, **kwargs):
 		"""
 		Return new socket.
-		Allowed keywords (and their default values):
+		
+		Parameter
+		---------
+			destination:	RMAP.Destination instance
+			
+		Keywords (and their default values)
+		-----------------------------------
 			timeout: None for no time out, integers for time out second(s) (default: 1)
 		"""
 		return Socket(self, destination, **kwargs)
@@ -143,6 +160,10 @@ class Engine(object):
 	def request_sid(self, reply, block=True):
 		"""
 		Retrieve new socket id and register reply queue.
+		
+		Parameter
+		---------
+			reply:	Socket reply queue
 		"""
 		# First clean up sid pool
 		self.clean_sid()
@@ -170,6 +191,11 @@ class Engine(object):
 	def return_sid(self, sid, timedout=False):
 		"""
 		Return socket id. Set timedout to True if transaction has timed out and put socket it to temporary socket pool.
+		
+		Parameter
+		---------
+			sid:		Socket id
+			timedout:	True for timed-out transactions (Default: False)
 		"""
 		# Delete sid from pool
 		self.replies[sid] = None
@@ -195,7 +221,26 @@ class Engine(object):
 			
 
 class Socket(object):
+	"""
+	RMAP Socket
+	"""
 	def __init__(self, engine, destination, **kwargs):
+		"""
+		Create RMAP Socket
+		
+		Parameters
+		----------
+			engine:			RMAP Engine (RMAP.Engine instance)
+			destination:	RMAP Destination (RMAP.Destination instance)
+		
+		Keywords (and their default values)
+		-----------------------------------
+			timeout: None for no time out, integers for time out second(s) (default: 1)
+		
+		Note
+		----
+		* This should not be directly instantiated. Use RMAP.socket to create a socket instead.
+		"""
 		self.engine = engine
 		self.dest = destination
 
@@ -216,14 +261,26 @@ class Socket(object):
 	def read(self, address, length, **kwargs):
 		"""
 		RMAP Read
-		Allowed keywords (and their default values):
+		
+		Parameters
+		----------
+			address:	address to read
+			length:		words to read
+		
+		Keywords (and their default values)
+		-----------------------------------
 			increment: 0 for non-incremental read, 1 for incremental read (default)
 			extended_address: extended read address (default: 0x00)
-		Return (data, status)
+
+		Returns
+		-------
+			data:		read data
+			status:		RMAP status
 		
-		Note:
-		This function is not thread-safe. Simultaneous call to this function of the *same* instance is not supported.
-		Generate new socket per thread instead.
+		Note
+		----
+		* This function is not thread-safe. Simultaneous call to this function of the *same* instance is not supported.
+		  Generate new socket per thread instead.
 		"""
 		reply = None
 		while not reply:
@@ -253,16 +310,27 @@ class Socket(object):
 	def write(self, address, data, **kwargs):
 		"""
 		RMAP Write
+		
+		Parameters
+		----------
+			address:	address to write
+			length:		words to write
+		
 		Allowed keywords (and theier default values)
-			verify: 0 for not verifying CRCs before write, 1 for verifying CRCs before write (default)
-			ack: 0 for non-acknowledged write, 1 for acknowledged write (default)
-			increment: 0 for non-incremental write, 1 for incremental write (default)
-			extended_address: extended read address (default: 0x00)
-		Return status (verify = 1) or None (verify = 0)
+		--------------------------------------------
+			verify:		0 for not verifying CRCs before write, 1 for verifying CRCs before write (default)
+			ack:		0 for non-acknowledged write, 1 for acknowledged write (default)
+			increment:	0 for non-incremental write, 1 for incremental write (default)
+			extended_address:
+						extended read address (default: 0x00)
+		Returns
+		-------
+			status:		(verify = 1) or None (verify = 0)
 			
-			Note:
-			This function is not thread-safe. Simultaneous call to this function of the *same* instance is not supported.
-			Generate new socket per thread instead.
+		Note
+		----
+		* This function is not thread-safe. Simultaneous call to this function of the *same* instance is not supported.
+		  Generate new socket per thread instead.
 		"""
 		# packetize write command
 		packet = packetize(self.sid, self.dest, address, len(data), data, **kwargs)
@@ -307,27 +375,50 @@ class Destination(object):
 	# Magic salt
 	__slots__ = ["dest_address", "dest_key", "src_address", "crc", "word_width"]
 
-	# CRC Map
-	crc_map = {}
+	# Dictionary
+	dictionary = {}
 
-	def __init__(self, dest_address=0x00, dest_key=0x00, src_address=0x00, crc=None, word_width=1):
+	def __init__(self, src_address, dest_address, dest_key=None, crc=None, word_width=None):
+		"""
+		Create RMAP Destination
+		
+		Parameters
+		----------
+			src_address:		source logical address
+			dest_address:		destination logical address
+			dest_key:			destination key (optional, default: 0x00)
+			crc:				CRC type (optional, default: None)
+			word_width:			word width (optional, default: 1)
+		
+		Note
+		----
+		* When instantiated givining *only* src_address and dest_address, other 3 parameters are looked-up
+		  from the internal dictionary using the combination of given 2 parameter. If not found, default
+		  values will be applied.
+		* Otherwise, will use given values (use default values if not given), and store the destination to
+		  the internal dictionary.
+		"""
 		self.dest_address = dest_address
-		self.dest_key = dest_key
 		self.src_address = src_address
-		self.crc = crc
-		self.word_width = word_width
-
-		if crc:
-			Destination.crc_map[dest_address] = crc
-
-	def lookup_crc(self):
-		"""
-		Return CRC type for registered destinations. If not registered, return None.
-		"""
-		try:
-			return Destination.crc_map[self.dest_address]
-		except KeyError:
-			return None
+		
+		if dest_key is None and crc is None and word_width is None:
+			# Try lookup dictionary
+			if (dest_address, src_address) in Destination.dictionary:
+				# Found. Recover missing items from the dictionary
+				self.dest_key, self.crc, self.word_width = Destination.dictionary[(dest_address, src_address)]
+			else:
+				# Not found. Use default values
+				self.dest_key = dest_key if dest_key else 0x00 
+				self.crc = crc
+				self.word_width = word_width if word_width else 1
+		else:
+			# No need to lookup dictionary
+			self.dest_key = dest_key if dest_key else 0x00 
+			self.crc = crc
+			self.word_width = word_width if word_width else 1
+			
+			# Store to dictionary
+			Destination.dictionary[(dest_address, src_address)] = (self.dest_key, self.crc, self.word_width)
 
 def packetize(tid, dest, address, length, data=None, **kwargs):
 	"""
@@ -335,6 +426,26 @@ def packetize(tid, dest, address, length, data=None, **kwargs):
 	Packetize commands to RMAP protocol packets.
 	
 	For RMAP Read command, leave data as None, or interpreted as RMAP Write command.
+	
+	Parameters
+	----------
+		tid:		transaction ID
+		dest:		destination
+		address:	accessing address
+		length:		accessing length
+		data:		data to write, None to read
+	
+	Keywords (and their default values)
+	-----------------------------------
+		increment:	increment flag (default: 1)
+		verify:		verify flag (default: 1)
+		ack:		ack flag (default: 1)
+		extended_address:
+					extended address (default: 0x00)
+	
+	Returns
+	-------
+		packet:		generated RMAP packet
 	"""
 	
 	# Initialize
@@ -367,18 +478,33 @@ def depacketize(packet, check_crc=False):
 	"""
 	RMAP Depacketizer
 	Depacketize RMAP protocol packets.
+	
+	Parameters
+	----------
+		packet:		RMAP packet to depacketize
+		check_crc:	True to check CRC, False not to.
+	
+	Returns
+	-------
+		tid:		transaction ID
+		dest:		destination
+		status:		transaction status
+		data:		data
+		keywords:	rw, verify, ack, and increment flags
 	"""
 	# Initialize
 	unpack = struct.unpack
-	dest = Destination()
 	
 	# Packet Header
-	(dest.src_address, ) = unpack('B', packet[0:1])
+	(src_address, ) = unpack('B', packet[0:1])
 	assert unpack('B', packet[1:2])[0] == 0x01
 	(rw, verify, ack, increment) = (lambda (com, ): ((com & 0x20) >> 5, (com & 0x10) >> 4, (com & 0x08) >> 3, (com & 0x04) >> 2))(unpack('B', packet[2:3]))
 	(status, ) = unpack('B', packet[3:4])
-	(dest.dest_address, ) = unpack('B', packet[4:5])
+	(dest_address, ) = unpack('B', packet[4:5])
 	tid = (lambda (ms, ls, ): (ms << 8) + ls)(unpack('BB', packet[5:7]))
+	
+	# Recover destination
+	dest = Destination(src_address, dest_address)
 	
 	if rw == 1:
 		# Write reply
@@ -389,18 +515,27 @@ def depacketize(packet, check_crc=False):
 		length = (lambda (ms, b, ls, ): (ms << 16) + (b << 8) + ls)(unpack('BBB', packet[8:11]))
 		(crc, ) = unpack('B', packet[11:12])
 		if check_crc:
-			assert crc == calc_crc(dest.lookup_crc(), packet[0:11])
+			assert crc == calc_crc(dest.crc, packet[0:11])
 		
 		data = unpack('B'*length, packet[12:12+length])
 		(crc, ) = unpack('B', packet[12+length:12+length+1])
 		if check_crc:
-			assert crc == calc_crc(dest.lookup_crc(), packet[12:12+length])
+			assert crc == calc_crc(dest.crc, packet[12:12+length])
 	
 	return tid, dest, status, data, {'rw': rw, 'verify': verify, 'ack': ack, 'increment': increment}
 
 def calc_crc(crc, data):
 	"""
 	Calculate RMAP packet CRC
+	
+	Parameters
+	----------
+		crc:	CRC type
+		data:	data to calculate CRC
+	
+	Returns
+	-------
+		crc:	Calculated CRC	
 	"""
 	
 	# This is ugly, but fast

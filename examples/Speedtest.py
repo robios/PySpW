@@ -24,7 +24,7 @@ def execute():
 	rmap = RMAP.Engine(spwif) if method == 2 else None
 	
 	# Set destination
-	dest = RMAP.Destination(dest_address=0x30, src_address=0xfe, dest_key=0x02, crc=RMAP.CRC_DraftF, word_width=1)
+	dest = RMAP.Destination(src_address=0xfe, dest_address=0x30, dest_key=0x02, crc=RMAP.CRC_DraftF, word_width=1)
 	
 	# Query parameters
 	saddr = input('Memory starting address: ')

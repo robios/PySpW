@@ -22,6 +22,7 @@ ControlFlag_RegisterAccess_WriteReply = '\x51'
 class Interface(object):
 	"""
 	SpaceWire Interface
+	
 	This interface talks SSDTP2 so this can connect to sthongo and SpaceWire-to-GigabitEther converters over TCP networks.
 	"""
 	def __init__(self, host, port=10030, timeout=None):
@@ -46,6 +47,10 @@ class Interface(object):
 	def send(self, packet):
 		"""
 		Send a packet to target using SSDTP2 protocol.
+		
+		Parameter
+		---------
+			packet:		packet to send
 		"""
 		# SSDTP2
 		header = '\x00\x00'
@@ -90,7 +95,10 @@ class Interface(object):
 	
 	def settimeout(self, timeout):
 		"""
-		Set socket time out in sencond.
+		Set socket time out in senconds.
+		
+		Parameter:
+			timeout:	timeout in seconds.
 		"""
 		self.timeout = timeout
 		if self.sock:
