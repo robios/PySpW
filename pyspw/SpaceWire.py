@@ -36,6 +36,7 @@ class Interface(object):
 		Connect to target. Exceptions are not handled within this function.
 		"""
 		self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+		self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
 		self.sock.settimeout(self.timeout)
 		self.sock.connect((self.host, self.port))
 		
