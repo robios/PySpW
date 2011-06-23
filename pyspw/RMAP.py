@@ -452,7 +452,7 @@ def packetize(tid, dest, address, length, data=None, **kwargs):
 	pack = struct.pack
 	blength = length * dest.word_width
 	
-	# Packet Header
+	# Packet Header (Big-Endian)
 	packet = pack('BB', dest.dest_address, 0x01)
 	if data is None:
 		# Read command
@@ -469,17 +469,17 @@ def packetize(tid, dest, address, length, data=None, **kwargs):
 	packet += pack('>BH', (blength >> 16) & 0xff, blength & 0xffff)
 	packet += pack('B', calc_crc(dest.crc, packet))
 	
-	# Packet Data
+	# Packet Data (Little-Endian)
 	if data is not None:
 		if dest.word_width == 1:
 			packet += pack('B'*len(data), *data)
 			packet += pack('B', calc_crc(dest.crc, pack('B'*len(data), *data)))
 		elif dest.word_width == 2:
-			packet += pack('>'+'H'*len(data), *data)
-			packet += pack('B', calc_crc(dest.crc, pack('>'+'H'*len(data), *data)))
+			packet += pack('<'+'H'*len(data), *data)
+			packet += pack('B', calc_crc(dest.crc, pack('<'+'H'*len(data), *data)))
 		elif dest.word_width == 4:
-			packet += pack('>'+'L'*len(data), *data)
-			packet += pack('B', calc_crc(dest.crc, pack('>'+'L'*len(data), *data)))
+			packet += pack('<'+'L'*len(data), *data)
+			packet += pack('B', calc_crc(dest.crc, pack('<'+'L'*len(data), *data)))
 		else:
 			assert False, "given word_width %d is not supported." % (dest.word_width)
 			
@@ -506,7 +506,7 @@ def depacketize(packet, check_crc=False):
 	# Initialize
 	unpack = struct.unpack
 	
-	# Packet Header
+	# Packet Header (Big-Endian)
 	(src_address, ) = unpack('B', packet[0:1])
 	assert unpack('B', packet[1:2])[0] == 0x01
 	(rw, verify, ack, increment) = (lambda (com, ): ((com & 0x20) >> 5, (com & 0x10) >> 4, (com & 0x08) >> 3, (com & 0x04) >> 2))(unpack('B', packet[2:3]))
@@ -532,12 +532,13 @@ def depacketize(packet, check_crc=False):
 		if check_crc:
 			assert crc == calc_crc(dest.crc, packet[0:11])
 		
+		# Data (Little-Endian)
 		if dest.word_width == 1:
 			data = unpack('B'*length, packet[12:12+blength])
 		elif dest.word_width == 2:
-			data = unpack('>'+'H'*length, packet[12:12+blength])
+			data = unpack('<'+'H'*length, packet[12:12+blength])
 		elif dest.word_width == 4:
-			data = unpack('>'+'L'*length, packet[12:12+blength])
+			data = unpack('<'+'L'*length, packet[12:12+blength])
 		else:
 			assert False, "given word_width %d is not supported." % (dest.word_width)
 
