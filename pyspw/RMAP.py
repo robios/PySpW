@@ -78,19 +78,23 @@ class Engine(object):
 			self.running = False
 			return
 
-	def __init__(self, spwif):
+	def __init__(self, spwif, timeout=1):
 		"""
 		Create RMAP Engine
 		
 		Parameter
 		---------
 			spwif:		SpaceWire.Interface instance
+			timeout:	timeout in seconds before retry
 		
 		Note
 		----
 		* spwif will be opened if closed.
+		* timeout is *not* SpaceWire interface timeout, but is timeout before resending
+		  a request packet when a reply packet does not arrive.
 		"""
 		self.spwif = spwif
+		self.timeout = timeout
 		
 		# Child processor handles
 		self.receiver = None
@@ -106,7 +110,7 @@ class Engine(object):
 		# Lock
 		self.lock = threading.Lock()
 		
-		# Set SpW I/F timeout
+		# Set SpW I/F timeout, required safe stop of child classes
 		self.spwif.settimeout(1)
 	
 	def start(self):
@@ -151,7 +155,7 @@ class Engine(object):
 			
 		Keywords (and their default values)
 		-----------------------------------
-			timeout: None for no time out, integers for time out second(s) (default: 1)
+			retry:			None for infinite retry, or integers for number of retries (default: None)
 		"""
 		return Socket(self, destination, **kwargs)
 
@@ -233,7 +237,7 @@ class Socket(object):
 		
 		Keywords (and their default values)
 		-----------------------------------
-			timeout: None for no time out, integers for time out second(s) (default: 1)
+			retry:			allowed retry counts. None for infinite retry, or integers for number of retries (default: None)
 		
 		Note
 		----
@@ -242,15 +246,15 @@ class Socket(object):
 		self.engine = engine
 		self.dest = destination
 
-		# Default timeout: 1 second
-		self.timeout = kwargs.get('timeout', 1)
+		# Allowed retry count (default: forever)
+		self.retry = kwargs.get('retry', None)
 		
 		# Generate reply queue and register it
 		self.reply = Queue.Queue()
 		self.sid = self.engine.request_sid(self.reply)
 		
-		# Reset timeout counter
-		self.timeout_count = 0
+		# Reset accumulated retry counter
+		self.retries = 0
 
 	def __del__(self):
 		# Unregister reply queue
@@ -267,44 +271,62 @@ class Socket(object):
 		
 		Keywords (and their default values)
 		-----------------------------------
-			increment: 0 for non-incremental read, 1 for incremental read (default)
-			extended_address: extended read address (default: 0x00)
+			increment:	0 for non-incremental read, 1 for incremental read (default)
+			extended_address:
+						extended read address (default: 0x00)
 
 		Returns
 		-------
-			data:		read data
-			status:		RMAP status
+			data:		read data or None if time out
+			status:		RMAP status or -1 if time out
 		
 		Note
 		----
 		* This function is not thread-safe. Simultaneous call to this function of the *same* instance is not supported.
 		  Generate new socket per thread instead.
 		"""
-		reply = None
-		while not reply:
+		
+		# Local retry counter
+		retry = 0
+		
+		while True:
 			# Packetize read command
 			packet = packetize(self.sid, self.dest, address, length, **kwargs)
-
+			
 			# Request command
 			self.engine.request(packet)
-
+			
 			# Wait for reply
 			try:
-				reply = self.reply.get(timeout=self.timeout)
+				reply = self.reply.get(timeout=self.engine.timeout)
+				
+				# Return received data and status
+				return (reply[2], reply[1])
+			
 			except Queue.Empty:
 				# Timed out
+				
 				# Return socket id with timed-out flag set
 				self.engine.return_sid(self.sid, timedout=True)
 				
+				# Force to empty reply queue, just to make it sure
+				try:
+					self.reply.get_nowait()
+				except Qeueu.Empty:
+					pass
+				
 				# Renew socket id
 				self.sid = self.engine.request_sid(self.reply)
-
-				self.timeout_count += 1
-				continue
-		
-		# Return received data and status
-		return (reply[2], reply[1])
-		
+				
+				# Count-up counters
+				retry += 1
+				self.retries += 1
+				
+				# Do we retry?
+				if self.retry is not None and retry > self.retry:
+					# Exceeded allowed retry count
+					return (None, -1)
+	
 	def write(self, address, data, **kwargs):
 		"""
 		RMAP Write
@@ -323,46 +345,59 @@ class Socket(object):
 						extended read address (default: 0x00)
 		Returns
 		-------
-			status:		(verify = 1) or None (verify = 0)
+			status:		RMAP status or -1 if timeout (verify = 1), or None (verify = 0)
 			
 		Note
 		----
 		* This function is not thread-safe. Simultaneous call to this function of the *same* instance is not supported.
 		  Generate new socket per thread instead.
 		"""
-		# packetize write command
-		packet = packetize(self.sid, self.dest, address, len(data), data, **kwargs)
 		
-		# Request command
-		if kwargs.get('ack', 1) == 0:
-			# No acknowledgement required. Just request command and quit
+		# Local retry counter
+		retry = 0
+		
+		while True:
+			# packetize write command
+			packet = packetize(self.sid, self.dest, address, len(data), data, **kwargs)
+						
+			# Request command
 			self.engine.request(packet)
-			return None
-		else:
-			# Acknowledgement required
-			reply = None
-			while not reply:
-				self.engine.request(packet)
-
-				# Wait for reply
-				try:
-					reply = self.reply.get(timeout=self.timeout)
-				except Queue.Empty:
-					# Timed out
-					
-					# Return socket id with timed-out flag set
-					self.engine.return_sid(self.sid, timedout=True)
-
-					# Renew socket id
-					sid = self.engine.request_sid(self.reply)
-
-					# Repacketize write command
-					packet = packetize(self.sid, self.dest, address, len(data), data, **kwargs)
-					
-					self.timeout_count += 1
-					continue
 			
-			return reply[1]
+			# Acknowledgement required?
+			if kwargs.get('ack', 1) == 0:
+				# No acknowledgement required. Quit.
+				return None
+			
+			# Wait for reply
+			try:
+				reply = self.reply.get(timeout=self.engine.timeout)
+				
+				# Return status
+				return reply[1]
+			
+			except Queue.Empty:
+				# Timed out
+				
+				# Return socket id with timed-out flag set
+				self.engine.return_sid(self.sid, timedout=True)
+				
+				# Force to empty reply queue, just to make it sure
+				try:
+					self.reply.get_nowait()
+				except Qeueu.Empty:
+					pass
+				
+				# Renew socket id
+				self.sid = self.engine.request_sid(self.reply)
+				
+				# Count-up counters
+				retry += 1
+				self.retries += 1
+				
+				# Do we retry?
+				if self.retry is not None and retry > self.retry:
+					# Exceeded allowed retry count
+					return -1
 
 class Destination(object):
 	"""

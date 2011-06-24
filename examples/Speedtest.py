@@ -74,8 +74,8 @@ def execute():
 			
 			lock.acquire()
 			print "Thread(%d) completed." % id,			
-			if sock.timeout_count:
-				print " %d time(s) timed out." % sock.timeout_count
+			if sock.retries:
+				print " %d time(s) timed out." % sock.retries
 			else:
 				print
 			lock.release()
