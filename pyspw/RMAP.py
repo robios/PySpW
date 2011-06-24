@@ -108,15 +108,16 @@ class Engine(object):
 		
 		# Set SpW I/F timeout
 		self.spwif.settimeout(1)
-		
-		# Start SpW I/F if not started
-		if not self.spwif.sock:
-			self.spwif.open()
 	
 	def start(self):
 		"""
 		Start RMAP engine. RMAP socket read/write will not work (stop forever unless timeout is set) before starting RMAP engine.
 		"""
+		
+		# Start SpW I/F if not started
+		if not self.spwif.sock:
+			self.spwif.open()
+		
 		# Start Receiver & Requester
 		self.receiver = self.Receiver(self)
 		self.requester = self.Requester(self)
@@ -157,7 +158,7 @@ class Engine(object):
 	def request(self, packet):
 		self.requests.put(packet)
 
-	def request_sid(self, reply, block=True):
+	def request_sid(self, reply):
 		"""
 		Retrieve new socket id and register reply queue.
 		
@@ -169,7 +170,7 @@ class Engine(object):
 		self.clean_sid()
 		
 		# Pop transaction id
-		while block:
+		while True:
 			try:
 				sid = self.sids.pop()
 				break
@@ -180,14 +181,11 @@ class Engine(object):
 				# Clean up again
 				self.clean_sid()
 		
-				# Let's try again
-				continue
-
 		# Register reply to pool
 		self.replies[sid] = reply
-
-		return sid
 		
+		return sid
+	
 	def return_sid(self, sid, timedout=False):
 		"""
 		Return socket id. Set timedout to True if transaction has timed out and put socket it to temporary socket pool.
