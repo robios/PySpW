@@ -312,7 +312,7 @@ class Socket(object):
 				# Force to empty reply queue, just to make it sure
 				try:
 					self.reply.get_nowait()
-				except Qeueu.Empty:
+				except Queue.Empty:
 					pass
 				
 				# Renew socket id
@@ -384,7 +384,7 @@ class Socket(object):
 				# Force to empty reply queue, just to make it sure
 				try:
 					self.reply.get_nowait()
-				except Qeueu.Empty:
+				except Queue.Empty:
 					pass
 				
 				# Renew socket id
