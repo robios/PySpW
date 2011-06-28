@@ -6,6 +6,7 @@
 
 import socket
 import struct
+import sys
 
 # SSDTP2 Control Flags
 DataFlag_Complete_EOP = '\x00'
@@ -25,19 +26,72 @@ class Interface(object):
 	
 	This interface talks SSDTP2 so this can connect to sthongo and SpaceWire-to-GigabitEther converters over TCP networks.
 	"""
-	def __init__(self, host, port=10030, timeout=None):
+	def __init__(self, host, port=10030, timeout=None, **kwargs):
+		"""
+		Create SpaceWire Interface
+		
+		Parameters
+		----------
+			host:		ip or host name to connect
+			port:		port number (Default: 10030)
+			timeout:	socket time-out in seconds, None for no time-out (Default: None)
+		
+		Keywords
+		--------
+			keepalive:	True to override system-wide keepalive, or False not to (Default: True)
+			keepidle:	idle seconds before sending a keepalive packet (Default: 120)
+			keepintvl:	interval seconds sending keepalive packets after the first packet (Default: 2)
+			keepcnt:	maximum counts before closing socket when no reply (Default: 4)
+		
+		Note
+		----
+		* keepintvl and keepcnt overrides are only supported in linux platforms so far.
+		  In OS X, overriding keepidle is possible, but keepintvl is defaulted to 75000
+		  and unable to override socket-wise. Use following commands to set those variables
+		  (keepcnt is still not configurable though):
+		
+		  $ sudo sysctl -w net.inet.tcp.always_keepalive=1
+		  $ sudo sysctl -w net.inet.tcp.keepidle=120000		(in milliseconds)
+		  $ sudo sysctl -w net.inet.tcp.keepintvl=2000		(in milliseconds)
+		
+		* keepalive is currently not supported in Windows.
+		"""
 		self.host = host
 		self.port = port
 		self.timeout = timeout
+		
+		self.keepalive = kwargs.get('keepalive', True)
+		self.keepidle = kwargs.get('keepidle', 120)
+		self.keepintvl = kwargs.get('keepintvl', 2)
+		self.keepcnt = kwargs.get('keepcnt', 4)
+		
 		self.sock = None
 		
 	def open(self):
 		"""
 		Connect to target. Exceptions are not handled within this function.
 		"""
+		
+		# Create a socket
 		self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-		self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
+		
+		# Set time-out
 		self.sock.settimeout(self.timeout)
+		
+		# Set keepalive
+		if self.keepalive:
+			self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
+			if hasattr(socket, 'TCP_KEEPCNT'):
+				self.sock.setsockopt(socket.IPPROTO_TCP, getattr(socket, 'TCP_KEEPIDLE'), self.keepidle)
+				self.sock.setsockopt(socket.IPPROTO_TCP, getattr(socket, 'TCP_KEEPINTVL'), self.keepintvl)
+				self.sock.setsockopt(socket.IPPROTO_TCP, getattr(socket, 'TCP_KEEPCNT'), self.keepcnt)
+			elif hasattr(socket, 'TCP_KEEPALIVE'):
+				self.sock.setsockopt(socket.IPPROTO_TCP, getattr(socket, 'TCP_KEEPALIVE'), self.keepidle)
+			elif sys.platform == 'darwin':
+				# Mac OS X has special value 0x10 to set keepidle
+				self.sock.setsockopt(socket.IPPROTO_TCP, 0x10, self.keepidle)
+		
+		# Connect to target
 		self.sock.connect((self.host, self.port))
 		
 	def close(self):
@@ -61,7 +115,11 @@ class Interface(object):
 		
 	def receive(self):
 		"""
-		Receive a packet from target. This function blocks if time out is not set and there's nothing to receive.
+		Receive a packet from target.
+		
+		Note
+		----
+		* This function will block if time-out is not set and there's nothing to receive.
 		"""
 		# SSDTP2
 		header = '\xff'

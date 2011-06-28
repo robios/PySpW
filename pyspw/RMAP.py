@@ -85,7 +85,7 @@ class Engine(object):
 		Parameter
 		---------
 			spwif:		SpaceWire.Interface instance
-			timeout:	timeout in seconds before retry
+			timeout:	timeout in seconds before retry (Default: 1)
 		
 		Note
 		----
