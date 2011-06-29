@@ -26,7 +26,7 @@ class Interface(object):
 	
 	This interface talks SSDTP2 so this can connect to sthongo and SpaceWire-to-GigabitEther converters over TCP networks.
 	"""
-	def __init__(self, host, port=10030, timeout=None, **kwargs):
+	def __init__(self, host, port=10030, timeout=None, reconnect=True, **kwargs):
 		"""
 		Create SpaceWire Interface
 		
@@ -35,6 +35,7 @@ class Interface(object):
 			host:		ip or host name to connect
 			port:		port number (Default: 10030)
 			timeout:	socket time-out in seconds, None for no time-out (Default: None)
+			reconnect:	automatically reconnect if disconnected from peer (Default: True)
 		
 		Keywords
 		--------
@@ -60,13 +61,25 @@ class Interface(object):
 		self.port = port
 		self.timeout = timeout
 		
+		# Keepalive
 		self.keepalive = kwargs.get('keepalive', True)
 		self.keepidle = kwargs.get('keepidle', 120)
 		self.keepintvl = kwargs.get('keepintvl', 2)
 		self.keepcnt = kwargs.get('keepcnt', 4)
 		
+		# Initialization
 		self.sock = None
 		
+		# Reconnection Handling
+		if reconnect:
+			import threading
+			self.lock_send = threading.Lock()
+			self.lock_receive = threading.Lock()
+		else:
+			# Reconnection not required. Override functions.
+			self.send = self._send
+			self.receive = self._receive
+	
 	def open(self):
 		"""
 		Connect to target. Exceptions are not handled within this function.
@@ -98,10 +111,48 @@ class Interface(object):
 		if self.sock:
 			self.sock.close()
 		self.sock = None
-		
+	
 	def send(self, packet):
 		"""
-		Send a packet to target using SSDTP2 protocol.
+		Send a packet to target using SSDTP2 protocol (reconnection enabled).
+		
+		Parameter
+		---------
+			packet:		packet to send
+		"""
+		
+		while True:
+			try:
+				self.lock_send.acquire()
+				return self._send(packet)
+			except socket.error, e:
+				if e.errno == 32:
+					# Broken pipe. Reconnect and try again.
+					print 'send: reconnecting...'
+					# First thing is first. Release send lock to avoid dead-lock.
+					self.lock_send.release()
+					
+					# Reconnect after acquiring send lock
+					self.lock_receive.acquire()
+					self.close()
+					self.open()
+					self.lock_receive.release()
+					print 'send: reconnected'
+				else:
+					raise
+			except:
+				raise
+			
+			finally:
+				# Receive lock may be already released.
+				try:
+					self.lock_send.release()
+				except:
+					pass
+		
+	def _send(self, packet):
+		"""
+		Send a packet to target using SSDTP2 protocol (reconnection disabled).
 		
 		Parameter
 		---------
@@ -115,7 +166,45 @@ class Interface(object):
 		
 	def receive(self):
 		"""
-		Receive a packet from target.
+		Receive a packet from target (reconnection enabled).
+		
+		Note
+		----
+		* This function will block if time-out is not set and there's nothing to receive.
+		"""
+		
+		while True:
+			try:
+				self.lock_receive.acquire()
+				return self._receive()
+			except socket.error, e:
+				if e.errno == 104:
+					# Connection reset by peer. Reconnect and try again.
+					print 'receive: reconnecting...'
+					# First thing is first. Release receive lock to avoid dead-lock.
+					self.lock_receive.release()
+					
+					# Reconnect after acquiring send lock
+					self.lock_send.acquire()
+					self.close()
+					self.open()
+					self.lock_send.release()
+					print 'receive: reconnected'
+				else:
+					raise
+			except:
+				raise
+			
+			finally:
+				# Receive lock may be already released.
+				try:
+					self.lock_receive.release()
+				except:
+					pass
+	
+	def _receive(self):
+		"""
+		Receive a packet from target (reconnection disabled).
 		
 		Note
 		----
