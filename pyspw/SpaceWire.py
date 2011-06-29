@@ -26,7 +26,7 @@ class Interface(object):
 	
 	This interface talks SSDTP2 so this can connect to sthongo and SpaceWire-to-GigabitEther converters over TCP networks.
 	"""
-	def __init__(self, host, port=10030, timeout=None, **kwargs):
+	def __init__(self, host, port=10030, timeout=None, div=11, **kwargs):
 		"""
 		Create SpaceWire Interface
 		
@@ -35,6 +35,7 @@ class Interface(object):
 			host:		ip or host name to connect
 			port:		port number (Default: 10030)
 			timeout:	socket time-out in seconds, None for no time-out (Default: None)
+			div:		divider to SpaceWire Tx clock 125MHz (0 <= div <= 63) (Default: 11)
 		
 		Keywords
 		--------
@@ -45,6 +46,7 @@ class Interface(object):
 		
 		Note
 		----
+		* SpaceWire Tx clock = 125MHz / (div + 1)
 		* keepintvl and keepcnt overrides are only supported in linux platforms so far.
 		  In OS X, overriding keepidle is possible, but keepintvl is defaulted to 75000
 		  and unable to override socket-wise. Use following commands to set those variables
@@ -59,6 +61,7 @@ class Interface(object):
 		self.host = host
 		self.port = port
 		self.timeout = timeout
+		self.div = int(div)
 		
 		self.keepalive = kwargs.get('keepalive', True)
 		self.keepidle = kwargs.get('keepidle', 120)
@@ -94,6 +97,9 @@ class Interface(object):
 		# Connect to target
 		self.sock.connect((self.host, self.port))
 		
+		# Set Tx clock divider
+		self.settxdiv(self.div)
+	
 	def close(self):
 		if self.sock:
 			self.sock.close()
@@ -151,6 +157,28 @@ class Interface(object):
 				assert False
 		
 		return data
+	
+	def settxdiv(self, div):
+		"""
+		Set SpaceWire link speed
+		
+		Parameter:
+			div:	divider to SpaceWire Tx clock 125MHz (0 <= div <= 63) (Default: 0)
+		
+		Note:
+		* SpaceWire Tx clock = 125MHz / (div + 1)
+		"""
+		
+		# Boundary check
+		div = int(div)
+		div = 0 if div < 0 else div
+		div = 63 if div > 63 else div
+		
+		self.div = div
+		
+		# Set it if online
+		if self.sock:
+			self.sock.sendall('\x38\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x02' + struct.pack('B', div) + '\x00')
 	
 	def settimeout(self, timeout):
 		"""
