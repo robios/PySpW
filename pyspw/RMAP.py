@@ -5,10 +5,13 @@
 # 2011/05/30	K. Sakai (sakai@astro.isas.jaxa.jp)
 
 import socket
+import select
 import threading
 import struct
 import Queue
 import time
+
+import SpaceWire as sw
 
 # Configuration
 Max_SID = 0x0fff
@@ -18,10 +21,10 @@ class Engine(object):
 	RMAP Engine
 	"""
 	# Sub-class definitions
-	class Receiver(threading.Thread):
+	class Transceiver(threading.Thread):
 		"""
-		RMAP Reply Receiver
-		Receives reply packets and notify back a requester.
+		RMAP Transceiver
+		Transmits and recieves RMAP packets.
 		"""
 		def __init__(self, engine):
 			threading.Thread.__init__(self)
@@ -30,54 +33,126 @@ class Engine(object):
 			self.setDaemon(True)
 		
 		def run(self):
-			self.running = True
-			
-			# Nested *while* is for performance enhancement while enabling safe(?) thread stop
-			while self.running:
-				try:
-					while self.running:
-						tid, dest, status, data, opt = depacketize(self.engine.spwif.receive())
-						reply = self.engine.replies[tid]
-
-						# Check if transaction id is invalidated
-						if reply:
-							reply.put((dest, status, data, opt))
+			# Overrides receive of SpaceWire Interface
+			def receive(engine):
+				"""
+				Receive a packet from target.
+				"""
+				# SSDTP2
+				header = ''
+				data = ''
 				
-				except socket.timeout:
-					# Continue as long as running flag is set
-					pass
-
-			# Thread stopped
-			self.running = False
-			return
-	
-	class Requester(threading.Thread):
-		"""
-		RMAP Command Requester
-		Requester watches a request queue and sends packet(s) via SpaceWireIF
-		if the queue is not empty.
-		"""
-		def __init__(self, engine):
-			threading.Thread.__init__(self)
-			self.engine = engine
-			self.running = False
-			self.setDaemon(True)
-
-		def run(self):
+				while True:
+					# Receive for header at least 12 bytes
+					while len(header) < 12:
+						header += (yield)
+				
+					# Parse header
+					if header[0] in (sw.DataFlag_Complete_EOP, sw.DataFlag_Complete_EEP, sw.DataFlag_Fragmented):
+						# Data
+						tdata = header[12:]
+						fragment_size = reduce(lambda x, y: (x << 8) + y, struct.unpack('B'*len(header[2:12]), header[2:12]))
+						while len(tdata) < fragment_size:
+							tdata += (yield)
+						data += tdata[:fragment_size]
+						
+						if header[0] == sw.DataFlag_Fragmented:
+							header = tdata[fragment_size:]
+							continue
+						
+						header = tdata[fragment_size:]
+					
+					elif header[0] in (sw.ControlFlag_SendTimeCode, sw.ControlFlag_GotTimeCode):
+						tc = header[12:]
+						while len(tc) < 2:
+							tc += (yield)
+					
+						# Do nothing for time code for now
+						pass
+					
+						header = tc[2:]
+						
+						continue
+				
+					else:
+						assert False
+					
+					# Data ready
+					tid, dest, status, data, opt = depacketize(buffer(data))
+					reply = engine.replies[tid]
+					
+					# Check if transaction id is invalidated
+					if reply:
+						reply.put((dest, status, data, opt))
+					
+					# Re-initialize
+					data = ''
+			
+			# Initialization
+			send_buffer = ''
+			wfds = []
+			
+			# Prepare Recieve generator
+			receiver = receive(self.engine)
+			receiver.next()
+			
+			# Set sockets to non-blocking
+			self.engine.spwif.settimeout(0)
+			
+			# Start thread
 			self.running = True
-			try:
-				while self.running:
-					self.engine.spwif.send(self.engine.requests.get())
-					self.engine.requests.task_done()
 			
-			except TypeError:
-				# It's time to stop
-				pass
+			while self.running:
+				# Check request buffer
+				while not self.engine.requests.empty():
+					try:
+						packet = self.engine.requests.get_nowait()
+						length = len(packet)
+						header = '\x00\x00' + struct.pack('!HLL', length >> 64 & 0xffff, length >> 32 & 0xffffffff, length & 0xffffffff)
+						send_buffer += header + packet
+					except Queue.Empty:
+						break
+				
+				# Is there anything to send?
+				if send_buffer:
+					wfds = [ self.engine.spwif.sock ]
+				else:
+					wfds = []
+				
+				# Polling
+				r, w, e = select.select([ self.engine.spwif.sock ], wfds, [ self.engine.spwif ], 0.0)
+				
+				for es in e:
+					# Socket Error. Reconnect.
+					es.settimeout(None)
+					es.close()
+					es.open()
+					es.settimeout(0)
+				
+				for rs in r:
+					# Socket ready to read
+					receiver.send(rs.recv(8192))
+				
+				for ws in w:
+					# Socket ready to write
+					sent = ws.send(send_buffer)
+					send_buffer = send_buffer[sent:]
+				
+				# When nothing to do
+				if r == w == e == []:
+					# Sleep for a while
+					time.sleep(0.0001)
 			
-			# Thread stopped
+			# Thread Stopped
+			receiver.close()
+			
+			# Reset sockets to blocking
+			self.engine.spwif.settimeout(None)
+		
+		def stop(self):
 			self.running = False
-			return
-
+			self.join() 
+	
 	def __init__(self, spwif, timeout=1):
 		"""
 		Create RMAP Engine
@@ -110,9 +185,6 @@ class Engine(object):
 		# Lock
 		self.lock = threading.Lock()
 		
-		# Set SpW I/F timeout, required safe stop of child classes
-		self.spwif.settimeout(1)
-	
 	def start(self):
 		"""
 		Start RMAP engine. RMAP socket read/write will not work (stop forever unless timeout is set) before starting RMAP engine.
@@ -122,28 +194,16 @@ class Engine(object):
 		if not self.spwif.sock:
 			self.spwif.open()
 		
-		# Start Receiver & Requester
-		self.receiver = self.Receiver(self)
-		self.requester = self.Requester(self)
-		self.receiver.start()
-		self.requester.start()
+		# Start Transceiver
+		self.transceiver = self.Transceiver(self)
+		self.transceiver.start()
 		
 	def stop(self):
 		"""
-		Stop RMAP engine. May take less than 1 second.
+		Stop RMAP engine.
 		"""
 		# Stop Receiver & Requester
-		if self.receiver:
-			# Stop receiver
-			self.receiver.running = False
-		
-		if self.requester:
-			# This is a little rough way to stop it, but this is the best way for requester performance.
-			# Using Queue timeout will degrade performance. Don't use it.
-			self.requests.put(None)
-		
-		self.receiver.join()
-		self.requester.join()
+		self.transceiver.stop()
 		
 	def socket(self, destination, **kwargs):
 		"""
