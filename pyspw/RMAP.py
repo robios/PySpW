@@ -90,6 +90,7 @@ class Engine(object):
 			
 			# Initialization
 			send_buffer = ''
+			receive_buffer = ''
 			wfds = []
 			
 			# Prepare Recieve generator
@@ -103,16 +104,6 @@ class Engine(object):
 			self.running = True
 			
 			while self.running:
-				# Check request buffer
-				while not self.engine.requests.empty():
-					try:
-						packet = self.engine.requests.get_nowait()
-						length = len(packet)
-						header = '\x00\x00' + struct.pack('!HLL', length >> 64 & 0xffff, length >> 32 & 0xffffffff, length & 0xffffffff)
-						send_buffer += header + packet
-					except Queue.Empty:
-						break
-				
 				# Is there anything to send?
 				if send_buffer:
 					wfds = [ self.engine.spwif.sock ]
@@ -131,7 +122,7 @@ class Engine(object):
 				
 				for rs in r:
 					# Socket ready to read
-					receiver.send(rs.recv(8192))
+					receive_buffer += rs.recv(8192)
 				
 				for ws in w:
 					# Socket ready to write
@@ -140,6 +131,20 @@ class Engine(object):
 				
 				# When nothing to do
 				if r == w == e == []:
+					# Process received data
+					receiver.send(receive_buffer)
+					receive_buffer = ''
+					
+					# Check request queue
+					while not self.engine.requests.empty():
+						try:
+							packet = self.engine.requests.get_nowait()
+							length = len(packet)
+							header = '\x00\x00' + struct.pack('!HLL', length >> 64 & 0xffff, length >> 32 & 0xffffffff, length & 0xffffffff)
+							send_buffer += header + packet
+						except Queue.Empty:
+							break
+					
 					# Sleep for a while
 					time.sleep(0.0001)
 			
