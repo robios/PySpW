@@ -104,49 +104,62 @@ class Engine(object):
 			self.running = True
 			
 			while self.running:
-				# Is there anything to send?
-				if send_buffer:
-					wfds = [ self.engine.spwif.sock ]
-				else:
-					wfds = []
-				
-				# Polling
-				r, w, e = select.select([ self.engine.spwif.sock ], wfds, [ self.engine.spwif ], 0.0)
-				
-				for es in e:
-					# Socket Error. Reconnect.
-					es.settimeout(None)
-					es.close()
-					es.open()
-					es.settimeout(0)
-				
-				for rs in r:
-					# Socket ready to read
-					receive_buffer += rs.recv(8192)
-				
-				for ws in w:
-					# Socket ready to write
-					sent = ws.send(send_buffer)
-					send_buffer = send_buffer[sent:]
-				
-				# When nothing to do
-				if r == w == e == []:
-					# Process received data
-					receiver.send(receive_buffer)
-					receive_buffer = ''
+				try:
+					while self.running:
+						# Is there anything to send?
+						if send_buffer:
+							wfds = [ self.engine.spwif.sock ]
+						else:
+							wfds = []
+						
+						# Polling
+						r, w, e = select.select([ self.engine.spwif.sock ], wfds, [ self.engine.spwif ], 0.0)
+						
+						for es in e:
+							if self.engine.reconnect:
+								# Socket Error. Reconnect.
+								es.settimeout(None)
+								es.close()
+								es.open()
+								es.settimeout(0)
+						
+						for rs in r:
+							# Socket ready to read
+							receive_buffer += rs.recv(8192)
+						
+						for ws in w:
+							# Socket ready to write
+							sent = ws.send(send_buffer)
+							send_buffer = send_buffer[sent:]
+						
+						# When nothing to do
+						if r == w == e == []:
+							# Process received data
+							receiver.send(receive_buffer)
+							receive_buffer = ''
+							
+							# Check request queue
+							while not self.engine.requests.empty():
+								try:
+									packet = self.engine.requests.get_nowait()
+									length = len(packet)
+									header = '\x00\x00' + struct.pack('!HLL', length >> 64 & 0xffff, length >> 32 & 0xffffffff, length & 0xffffffff)
+									send_buffer += header + packet
+								except Queue.Empty:
+									break
+							
+							# Sleep for a while
+							time.sleep(0.0001)
 					
-					# Check request queue
-					while not self.engine.requests.empty():
-						try:
-							packet = self.engine.requests.get_nowait()
-							length = len(packet)
-							header = '\x00\x00' + struct.pack('!HLL', length >> 64 & 0xffff, length >> 32 & 0xffffffff, length & 0xffffffff)
-							send_buffer += header + packet
-						except Queue.Empty:
-							break
-					
-					# Sleep for a while
-					time.sleep(0.0001)
+				except socket.error, (errno, string):
+					if self.engine.reconnect:
+						# Socket Error. Reconnect.
+						self.engine.spwif.settimeout(None)
+						self.engine.spwif.close()
+						self.engine.spwif.open()
+						self.engine.spwif.settimeout(0)
+					else:
+						raise
 			
 			# Thread Stopped
 			receiver.close()
@@ -158,13 +171,14 @@ class Engine(object):
 			self.running = False
 			self.join() 
 	
-	def __init__(self, spwif, timeout=1):
+	def __init__(self, spwif, reconnect=True, timeout=1):
 		"""
 		Create RMAP Engine
 		
 		Parameter
 		---------
 			spwif:		SpaceWire.Interface instance
+			reconnect:	automatically reconnect if socket error (Default: True)
 			timeout:	timeout in seconds before retry (Default: 1)
 		
 		Note
@@ -174,11 +188,11 @@ class Engine(object):
 		  a request packet when a reply packet does not arrive.
 		"""
 		self.spwif = spwif
+		self.reconnect = reconnect
 		self.timeout = timeout
 		
 		# Child processor handles
-		self.receiver = None
-		self.requester = None
+		self.transceiver = None
 		
 		# Initialize pools
 		self.requests = Queue.Queue()
