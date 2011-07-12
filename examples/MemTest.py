@@ -13,7 +13,7 @@ def execute():
 	Memory Tester
 	"""
 	# Ask host
-	host = raw_input('Hostname: ')
+	host = raw_input('Hostname or IP address: ')
 	
 	# Initialize SpaceWire I/F and RMAP Engine
 	spwif = SpaceWire.Interface(host)
@@ -38,12 +38,10 @@ def execute():
 		length = min(mlength, saddr + size - caddr)
 		rdata = tuple([ random.randint(0, 255) for i in range(length) ])
 		print "Writing %d byte data to 0x%08X to 0x%08X" % (length, caddr, caddr + length)
-		status = sock.write(caddr, rdata, verify=1)
-		assert status == 0
+		sock.write(caddr, rdata, verify=1)
 		print "Reading %d byte data from 0x%08X to 0x%08X" % (length, caddr, caddr + length)
-		(data, status) = sock.read(caddr, length)
+		data = sock.read(caddr, length)
 		assert rdata == data
-		assert status == 0
 		caddr += length
 	etime = time.time()
 	

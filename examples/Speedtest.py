@@ -62,9 +62,7 @@ def execute():
 			caddr = saddr
 			sock = rmap.socket(dest)
 			for i in xrange(iteration):
-				(data, status) = sock.read(caddr, length)
-				#sock.write(caddr, data)
-				assert status == 0
+				data = sock.read(caddr, length)
 				assert len(data) == length
 				caddr += length
 				if caddr + length > saddr + size:

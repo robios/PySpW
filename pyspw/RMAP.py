@@ -356,8 +356,12 @@ class Socket(object):
 
 		Returns
 		-------
-			data:		read data or None if time out
-			status:		RMAP status or -1 if time out
+			data:		read data
+		
+		Raises
+		------
+			Timeout:	if retry count exceeded the allowed retry count
+			Error:		if RMAP Error
 		
 		Note
 		----
@@ -377,10 +381,15 @@ class Socket(object):
 			
 			# Wait for reply
 			try:
-				reply = self.reply.get(timeout=self.engine.timeout)
+				(dest, status, data, opt) = self.reply.get(timeout=self.engine.timeout)
 				
-				# Return received data and status
-				return (reply[2], reply[1])
+				# Return received data
+				if status:
+					# RMAP error
+					raise Error(status)
+				else:
+					# Return data
+					return data
 			
 			except Queue.Empty:
 				# Timed out
@@ -404,7 +413,7 @@ class Socket(object):
 				# Do we retry?
 				if self.retry is not None and retry > self.retry:
 					# Exceeded allowed retry count
-					return (None, -1)
+					raise Timeout
 	
 	def write(self, address, data, **kwargs):
 		"""
@@ -422,9 +431,11 @@ class Socket(object):
 			increment:	0 for non-incremental write, 1 for incremental write (default)
 			extended_address:
 						extended read address (default: 0x00)
-		Returns
-		-------
-			status:		RMAP status or -1 if timeout (verify = 1), or None (verify = 0)
+		
+		Raises
+		------
+			Timeout:	if retry count exceeded the allowed retry count
+			Error:		if RMAP Error
 			
 		Note
 		----
@@ -445,14 +456,17 @@ class Socket(object):
 			# Acknowledgement required?
 			if kwargs.get('ack', 1) == 0:
 				# No acknowledgement required. Quit.
-				return None
+				return
 			
 			# Wait for reply
 			try:
-				reply = self.reply.get(timeout=self.engine.timeout)
+				(dest, status, data, opt) = self.reply.get(timeout=self.engine.timeout)
 				
-				# Return status
-				return reply[1]
+				if status:
+					# RMAP error
+					raise Error(status)
+				else:
+					return
 			
 			except Queue.Empty:
 				# Timed out
@@ -476,7 +490,7 @@ class Socket(object):
 				# Do we retry?
 				if self.retry is not None and retry > self.retry:
 					# Exceeded allowed retry count
-					return -1
+					raise Timeout
 
 class Destination(object):
 	"""
@@ -686,6 +700,40 @@ def calc_crc(crc, data):
 	
 	return reduce(lambda x, y: table[(x ^ y) & 0xff], struct.unpack('B'*len(data), data), 0x00)
 
+class Timeout(Exception):
+	"""
+	RMAP Timeout
+	"""
+	pass
+
+class Error(Exception):
+	"""
+	RMAP Error
+	"""
+	def __init__(self, code):
+		self.code = 13 if code > 13 else code
+		(self.error, self.description) = Error_Description[code]
+	
+	def __str__(self):
+		return 'RMAP Error: %s' % self.error
+
+# Error Table (ECCS-E-50-11 Draft F)
+Error_Description = (
+	('Command executed successfully', ''),
+	('General error code', 'The detected error does not fit into the other error cases or the node does not support further distinction between the errors.'),
+	('Unused RMAP Packet Type or Command Code', 'The header CRC was decoded correctly but the packet type is reserved or the command is not used by the RMAP protocol. No reply should be sent if the ACK bit is not set.'),
+	('Invalid destination key', 'The header CRC was decoded correctly but the device key did not match that expected by the destination user application.'),
+	('Invalid data CRC', 'Error in the CRC of the data field.'),
+	('Early EOP', 'EOP marker detected before the end of the data.'),
+	('Carge too large', 'The expected amount of SpaceWire packet cargo has been received without receiving an EOP or EEP marker.'),
+	('EEP', 'EEP marker detected at or before the end of the data. Indicates that there was a communication failure of some sort on the network.'),
+	('Reserved', 'Reserved'),
+	('Verify buffer overrun', 'The verify before write bit of the command was set so that the data field was buffered in order verify the data CRC before transferring the data to destination memory. The data field was longer than could fit inside the verify buffer resulting in a buffer overrun.'),
+	('RMAP Command not implemented or not authorised', 'The destination user application did not authorise the requested operation. This may be because the command requested has not been implemented.'),
+	('RMW data length error', 'The amount of data in a RMW command does not match the data length field or is invalid (0x01, 0x03, 0x05, 0x07 or greater than 0x08).'),
+	('Invalid destination logical address', 'The header CRC was decoded correctly but the destination logical address was not the value expected by the destination.'),
+	('Reserved', 'Reserved')
+)
 
 # CRC Mode Constants
 (CRC_DraftE, CRC_DraftF, CRC_52C, CRC_Custom) = (0, 1, 2, -1)
