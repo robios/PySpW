@@ -518,7 +518,7 @@ class Destination(object):
 		
 		Note
 		----
-		* When instantiated givining *only* src_address and dest_address, other 3 parameters are looked-up
+		* When instantiated giving *only* src_address and dest_address, other 3 parameters are looked-up
 		  from the internal dictionary using the combination of given 2 parameter. If not found, default
 		  values will be applied.
 		* Otherwise, will use given values (use default values if not given), and store the destination to
